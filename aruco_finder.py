@@ -113,10 +113,10 @@ class ArucoFinder:
         distortion - is the camera distortion matrix
         RETURN list of rvecs, tvecs, and trash (so that it corresponds to the old estimatePoseSingleMarkers())
         '''
-        marker_points = np.array([[-marker_size / 2, marker_size / 2, 0],
-                                [marker_size / 2, marker_size / 2, 0],
-                                [marker_size / 2, -marker_size / 2, 0],
-                                [-marker_size / 2, -marker_size / 2, 0]], dtype=np.float32)
+        marker_points = np.array([[600, 600, 0],
+                                [2400, 600, 0],
+                                [2400, 1400, 0],
+                                [600, 1400, 0]], dtype=np.float32)
         trash = []
         rvecs = []
         tvecs = []
@@ -144,6 +144,57 @@ class ArucoFinder:
         tvecs = np.array(tvecs, dtype=np.float32)
 
         return rvecs, tvecs, trash
+    
+    def estimatePoseFromCenters(self, centers, mtx, distortion):
+        """
+        Estimate camera pose from 4 points (centers of 4 ArUco) and their positions in world coordinates.
+
+        Args:
+            centers (list of np.ndarray): liste des centres détectés dans l'image, shape (4,2)
+            world_positions (list of np.ndarray): liste des positions connues des marqueurs, shape (4,3)
+            mtx (np.ndarray): matrice intrinsèque caméra
+            distortion (np.ndarray): coefficients de distorsion caméra
+
+        Returns:
+            rvec (np.ndarray): vecteur rotation (3x1)
+            tvec (np.ndarray): vecteur translation (3x1)
+            ok (bool): True si solvePnP a réussi
+        """
+        object_points = np.array([
+                                    [600, 1400, 0],   # marqueur 20
+                                    [2400, 1400, 0],  # marqueur 21
+                                    [600, 600, 0],    # marqueur 22
+                                    [2400, 600, 0]    # marqueur 23
+                                ], dtype=np.float32)
+        if len(centers) < 4:
+            print("Pas assez de points pour solvePnP")
+            return None, None, False
+
+        # Convertir en np.array float32
+        image_points = np.array(centers, dtype=np.float32)
+
+        rvecs = []
+        tvecs = []
+
+        # SolvePnP
+        ok, rvec, tvec = cv2.solvePnP(
+            object_points,
+            image_points,
+            mtx,
+            distortion,
+            flags=cv2.SOLVEPNP_ITERATIVE
+        )
+
+        if ok:
+            rvec = rvec.reshape(1, 3)
+            tvec = tvec.reshape(1, 3)
+        
+
+        rvecs.append(rvec)
+        tvecs.append(tvec)
+
+        return rvecs, tvecs, ok
+    
 
     def camera_pose_in_world(self, rvec, tvec, marker_pos_world):
         """
@@ -171,6 +222,40 @@ class ArucoFinder:
         # Si le marqueur est aligné avec le monde, R_world_marker = I
         cam_rot_world = R_marker_cam.T  # si pas de rotation du marqueur dans le monde
 
+        print("pose : ")
+        print(cam_pos_world)
+        print("rot : " )
+        print(cam_rot_world)
+
+        return cam_pos_world, cam_rot_world
+    
+    def camera_pose_in_world_from_tags(self, rvec, tvec):
+        """
+        Calcule la position et l'orientation de la caméra dans le repère monde.
+        
+        Args:
+            rvec (np.ndarray): vecteur rotation (3x1) du marqueur dans le repère caméra.
+            tvec (np.ndarray): vecteur translation (3x1) du marqueur dans le repère caméra.
+            marker_pos_world (np.ndarray): position du centre du marqueur dans le repère monde (3x1).
+
+        Returns:
+            cam_pos_world (np.ndarray): position de la caméra dans le repère monde (3x1).
+            cam_rot_world (np.ndarray): rotation de la caméra dans le repère monde (3x3).
+        """
+        # Convertir rvec en matrice de rotation
+        R_marker_cam, _ = cv2.Rodrigues(rvec)  # marker -> camera
+        
+        # Position de la caméra dans le repère monde
+        cam_pos_world =  - R_marker_cam.T @ tvec.reshape(3,1)
+        
+        # Orientation de la caméra dans le repère monde
+        # R_marker_cam: marker -> camera
+        # R_cam_marker = R_marker_cam.T
+        # Pour passer à world: R_cam_world = R_cam_marker @ R_world_marker
+        # Si le marqueur est aligné avec le monde, R_world_marker = I
+        cam_rot_world = R_marker_cam.T  # si pas de rotation du marqueur dans le monde
+
+        print("pose : ")
         print(cam_pos_world)
         print("rot : " )
         print(cam_rot_world)
@@ -193,18 +278,36 @@ class ArucoFinder:
         if detected_corners:
             xs, ys, zs, aruIds= [],[],[],[]
             qws, qxs, qys, qzs = [],[],[],[]
+            centers = []
+            centers_id = []
             for corners, id in zip(detected_corners, detected_ids):
                 id = id[0]
+                print(id)
                 if id not in self.arucos:
                     continue
-                size = self.arucos[id]
-                rvecs, tvecs, _ = self.estimatePoseSingleMarkers(corners, size, self.camera_matrix, self.dist_coeffs)
-                
+                center = corners[0].mean(axis=0)
+                centers.append(center)
+                centers_id.append(id)
 
+                size = self.arucos[id]
+            
+            combined = list(zip(centers_id, centers))
+
+            # Sort by id
+            combined.sort(key=lambda x: x[0])
+            centers_id, centers = zip(*combined)
+
+            centers_id = list(centers_id)
+            centers = list(centers)
+
+            if centers :        
+                rvecs, tvecs, _ = self.estimatePoseFromCenters(centers, self.camera_matrix, self.dist_coeffs)
+                #rvecs, tvecs, _ = self.estimatePoseSingleMarkers(corners, size, self.camera_matrix, self.dist_coeffs)
+ 
                 if tvecs is not None:
                     rv, tv = rvecs[0], tvecs[0]
-                    print(id)
-                    self.camera_pose_in_world(rv, tv, known_markers[id])
+                    
+                    self.camera_pose_in_world_from_tags(rv, tv)
 
                     cv2.drawFrameAxes(frame, self.camera_matrix, self.dist_coeffs, rv, tv, size)
                     xs.append(tv[0][0])
