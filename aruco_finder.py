@@ -2,6 +2,7 @@
 import cv2
 import numpy as np
 import sys, os
+
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..')) # Avoids ModuleNotFoundError when finding generated folder
 # import ecal.nanobind_core as ecal_core
 # from ecal.msg.proto.core import Subscriber as ProtoSubscriber
@@ -46,8 +47,13 @@ class ArucoFinder:
         self.aruco_params = cv2.aruco.DetectorParameters()
         self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
 
+        self.world_objects = {}   # dict id → position world
+
         self.camera_matrix = None
         self.dist_coeffs = None
+
+        self.camera_pose_in_W = None
+        self.camera_rot_in_W = None
         
         self.open_capture()
 
@@ -113,10 +119,10 @@ class ArucoFinder:
         distortion - is the camera distortion matrix
         RETURN list of rvecs, tvecs, and trash (so that it corresponds to the old estimatePoseSingleMarkers())
         '''
-        marker_points = np.array([[600, 600, 0],
-                                [2400, 600, 0],
-                                [2400, 1400, 0],
-                                [600, 1400, 0]], dtype=np.float32)
+        marker_points = np.array([[-marker_size / 2, marker_size / 2, 0],
+                                [marker_size / 2, marker_size / 2, 0],
+                                [marker_size / 2, -marker_size / 2, 0],
+                                [-marker_size / 2, -marker_size / 2, 0]], dtype=np.float32)
         trash = []
         rvecs = []
         tvecs = []
@@ -196,74 +202,88 @@ class ArucoFinder:
         return rvecs, tvecs, ok
     
 
-    def camera_pose_in_world(self, rvec, tvec, marker_pos_world):
-        """
-        Calcule la position et l'orientation de la caméra dans le repère monde.
+    # def camera_pose_in_world(self, rvec, tvec, marker_pos_world):
+    #     """
+    #     Calcule la position et l'orientation de la caméra dans le repère monde.
         
-        Args:
-            rvec (np.ndarray): vecteur rotation (3x1) du marqueur dans le repère caméra.
-            tvec (np.ndarray): vecteur translation (3x1) du marqueur dans le repère caméra.
-            marker_pos_world (np.ndarray): position du centre du marqueur dans le repère monde (3x1).
+    #     Args:
+    #         rvec (np.ndarray): vecteur rotation (3x1) du marqueur dans le repère caméra.
+    #         tvec (np.ndarray): vecteur translation (3x1) du marqueur dans le repère caméra.
+    #         marker_pos_world (np.ndarray): position du centre du marqueur dans le repère monde (3x1).
 
-        Returns:
-            cam_pos_world (np.ndarray): position de la caméra dans le repère monde (3x1).
-            cam_rot_world (np.ndarray): rotation de la caméra dans le repère monde (3x3).
-        """
-        # Convertir rvec en matrice de rotation
-        R_marker_cam, _ = cv2.Rodrigues(rvec)  # marker -> camera
+    #     Returns:
+    #         cam_pos_world (np.ndarray): position de la caméra dans le repère monde (3x1).
+    #         cam_rot_world (np.ndarray): rotation de la caméra dans le repère monde (3x3).
+    #     """
+    #     # Convertir rvec en matrice de rotation
+    #     R_marker_cam, _ = cv2.Rodrigues(rvec)  # marker -> camera
         
-        # Position de la caméra dans le repère monde
-        cam_pos_world = marker_pos_world.reshape(3,1) - R_marker_cam.T @ tvec.reshape(3,1)
+    #     # Position de la caméra dans le repère monde
+    #     cam_pos_world = marker_pos_world.reshape(3,1) - R_marker_cam.T @ tvec.reshape(3,1)
         
-        # Orientation de la caméra dans le repère monde
-        # R_marker_cam: marker -> camera
-        # R_cam_marker = R_marker_cam.T
-        # Pour passer à world: R_cam_world = R_cam_marker @ R_world_marker
-        # Si le marqueur est aligné avec le monde, R_world_marker = I
-        cam_rot_world = R_marker_cam.T  # si pas de rotation du marqueur dans le monde
+    #     # Orientation de la caméra dans le repère monde
+    #     # R_marker_cam: marker -> camera
+    #     # R_cam_marker = R_marker_cam.T
+    #     # Pour passer à world: R_cam_world = R_cam_marker @ R_world_marker
+    #     # Si le marqueur est aligné avec le monde, R_world_marker = I
+    #     cam_rot_world = R_marker_cam.T  # si pas de rotation du marqueur dans le monde
 
-        print("pose : ")
-        print(cam_pos_world)
-        print("rot : " )
-        print(cam_rot_world)
+    #     print("pose : ")
+    #     print(cam_pos_world)
+    #     print("rot : " )
+    #     print(cam_rot_world)
 
-        return cam_pos_world, cam_rot_world
+    #     return cam_pos_world, cam_rot_world
     
     def camera_pose_in_world_from_tags(self, rvec, tvec):
         """
-        Calcule la position et l'orientation de la caméra dans le repère monde.
-        
+        Compute the camera pose in the world coordinate frame,
+        assuming the ArUco marker frame is perfectly aligned with the world frame.
+
         Args:
-            rvec (np.ndarray): vecteur rotation (3x1) du marqueur dans le repère caméra.
-            tvec (np.ndarray): vecteur translation (3x1) du marqueur dans le repère caméra.
-            marker_pos_world (np.ndarray): position du centre du marqueur dans le repère monde (3x1).
+            rvec (np.ndarray): Rotation vector (3x1) describing the marker pose 
+                            in the camera frame (marker → camera).
+            tvec (np.ndarray): Translation vector (3x1) describing the marker pose 
+                            in the camera frame (marker → camera).
 
         Returns:
-            cam_pos_world (np.ndarray): position de la caméra dans le repère monde (3x1).
-            cam_rot_world (np.ndarray): rotation de la caméra dans le repère monde (3x3).
+            cam_pos_world (np.ndarray): Camera position in the world frame (3x1).
+            cam_rot_world (np.ndarray): Camera rotation matrix in the world frame (3x3).
         """
-        # Convertir rvec en matrice de rotation
-        R_marker_cam, _ = cv2.Rodrigues(rvec)  # marker -> camera
-        
-        # Position de la caméra dans le repère monde
-        cam_pos_world =  - R_marker_cam.T @ tvec.reshape(3,1)
-        
-        # Orientation de la caméra dans le repère monde
-        # R_marker_cam: marker -> camera
-        # R_cam_marker = R_marker_cam.T
-        # Pour passer à world: R_cam_world = R_cam_marker @ R_world_marker
-        # Si le marqueur est aligné avec le monde, R_world_marker = I
-        cam_rot_world = R_marker_cam.T  # si pas de rotation du marqueur dans le monde
 
-        print("pose : ")
+        # --- Convert rotation vector into rotation matrix ---
+        # R_marker_cam: rotation from marker frame to camera frame
+        R_marker_cam, _ = cv2.Rodrigues(rvec)
+
+        # --- Compute camera position in world frame ---
+        # Inverting the transform:
+        # Camera position in marker frame is: -R^T * t
+        # Since marker frame ≡ world frame, this is also the camera position in world coordinates.
+        cam_pos_world = - R_marker_cam.T @ tvec.reshape(3, 1)
+
+        # --- Compute camera orientation in world frame ---
+        # R_marker_cam: marker → camera
+        # Therefore R_cam_marker = R_marker_cam.T
+        #
+        # Since marker frame is perfectly aligned with world frame:
+        # R_cam_world = R_cam_marker
+        cam_rot_world = R_marker_cam.T
+
+        print("Camera position (world):")
         print(cam_pos_world)
-        print("rot : " )
+        print("Camera rotation (world):")
         print(cam_rot_world)
+
+        self.camera_pose_in_W = cam_pos_world.flatten()    # (3,)
+        self.camera_rot_in_W  = cam_rot_world  
+
+        self.cam_pos_known = True
 
         return cam_pos_world, cam_rot_world
     
+    
 
-    def process(self, frame):
+    def get_camera_pose(self, frame):
         """Call it in a while true loop"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -283,7 +303,7 @@ class ArucoFinder:
             for corners, id in zip(detected_corners, detected_ids):
                 id = id[0]
                 print(id)
-                if id not in self.arucos:
+                if id not in [20,21,22,23]:
                     continue
                 center = corners[0].mean(axis=0)
                 centers.append(center)
@@ -328,7 +348,233 @@ class ArucoFinder:
         return frame
     
 
+    def draw_world_map(self):
+        """
+        Carte monde top-down :
+        - table fixe
+        - ArUco à l'échelle réelle
+        - caméra à l'échelle réelle
+        - RIEN ne sort de la table
+        """
+
+        if not hasattr(self, "world_objects") or len(self.world_objects) == 0:
+            return
+
+        # ============================
+        # PARAMÈTRES MONDE
+        # ============================
+
+        TABLE_X = 3000  # mm
+        TABLE_Y = 2000  # mm
+
+        # Centre monde = centre table
+        cx = TABLE_X / 2
+        cy = TABLE_Y / 2
+
+        # ============================
+        # IMAGE
+        # ============================
+
+        img_size = 800
+        margin = 40  #
+
+        map_img = np.ones((img_size, img_size, 3), dtype=np.uint8) * 255
+
+        px_per_mm_x = (img_size - 2 * margin) / TABLE_X
+        px_per_mm_y = (img_size - 2 * margin) / TABLE_Y
+        px_per_mm = min(px_per_mm_x, px_per_mm_y)
+
+        # Origine graphique 
+        ox = img_size // 2
+        oy = img_size // 2
+
+        # ============================
+        # 1) DESSIN TABLE
+        # ============================
+
+        table_corners = [
+            (0, 0),
+            (TABLE_X, 0),
+            (TABLE_X, TABLE_Y),
+            (0, TABLE_Y)
+        ]
+
+        table_pts_img = []
+        for xw, yw in table_corners:
+            xi = int(ox + (xw - cx) * px_per_mm)
+            yi = int(oy - (yw - cy) * px_per_mm)
+            table_pts_img.append((xi, yi))
+
+        cv2.polylines(
+            map_img,
+            [np.array(table_pts_img, dtype=np.int32)],
+            True,
+            (255, 0, 0),
+            3
+        )
+
+        # draw aruco
+
+        for aruco_id, data in self.world_objects.items():
+            pos = data["pos"]    # centre (mm)
+
+            print("dessin pos")
+            print(pos)
+
+            size = data["size"]  # taille réelle (mm)
+
+            xw, yw = pos[0], pos[1]
+
+            xi = int(ox + (xw - cx) * px_per_mm)
+            yi = int(oy - (yw - cy) * px_per_mm)
+
+            half_px = int((size / 2) * px_per_mm)
+
+            # Le marker est garanti dans la table SI le monde est cohérent
+            cv2.rectangle(
+                map_img,
+                (xi - half_px, yi - half_px),
+                (xi + half_px, yi + half_px),
+                (0, 0, 255),
+                2
+            )
+
+            # centre exact
+            cv2.circle(map_img, (xi, yi), 3, (0, 0, 0), -1)
+
+            cv2.putText(
+                map_img,
+                f"ID {aruco_id}",
+                (xi + half_px + 5, yi),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 0, 0),
+                1
+            )
+
+        # ============================
+        # 3) DESSIN CAMÉRA (À L’ÉCHELLE)
+        # ============================
+
+        if hasattr(self, "camera_pose_in_W") and self.camera_pose_in_W is not None:
+            print(self.camera_pose_in_W)
+            cam_x = self.camera_pose_in_W[0]
+            cam_y = self.camera_pose_in_W[1]
+
+            xi = int(ox + (cam_x - cx) * px_per_mm)
+            yi = int(oy - (cam_y - cy) * px_per_mm)
+
+            cam_radius_mm = 50  
+            cam_radius_px = int(cam_radius_mm * px_per_mm)
+
+            cv2.circle(map_img, (xi, yi), cam_radius_px, (0, 0, 0), -1)
+            cv2.putText(
+                map_img,
+                "CAM",
+                (xi + cam_radius_px + 5, yi),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                1
+            )
+
+            if hasattr(self, "camera_rot_in_W"):
+                R = self.camera_rot_in_W
+                cam_x_axis = R[:, 0]
+
+                L_mm = 300
+                dx = int(cam_x_axis[0] * L_mm * px_per_mm)
+                dy = int(cam_x_axis[1] * L_mm * px_per_mm)
+
+                cv2.arrowedLine(
+                    map_img,
+                    (xi, yi),
+                    (xi + dx, yi - dy),
+                    (0, 150, 0),
+                    2,
+                    tipLength=0.2
+                )
+
+        # ============================
+        # AFFICHAGE
+        # ============================
+
+        cv2.imshow("World Map (Metric, Fixed)", map_img)
+
+
+
+
+    def process(self, frame):
+        """Call it in a while true loop"""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Détection ArUco
+        detected_corners, detected_ids, rejected = self.aruco_detector.detectMarkers(gray)
+
+        if self.display:
+            cv2.aruco.drawDetectedMarkers(frame, detected_corners, detected_ids)
+        
+        cv2.aruco.drawDetectedMarkers(frame, detected_corners, detected_ids)
+
+        if detected_corners:
+            xs, ys, zs, aruIds= [],[],[],[]
+            qws, qxs, qys, qzs = [],[],[],[]
+            for corners, id in zip(detected_corners, detected_ids):
+                id = id[0]
+                print(id)
+                if id not in self.arucos:
+                    continue
+                size = self.arucos[id]
+            
+                #rvecs, tvecs, _ = self.estimatePoseFromCenters(corners, self.camera_matrix, self.dist_coeffs)
+                rvecs, tvecs, _ = self.estimatePoseSingleMarkers(corners, size, self.camera_matrix, self.dist_coeffs)
+ 
+                if tvecs is not None:
+                    rv, tv = rvecs[0], tvecs[0]
+
+                    #posW = self.objects_in_world(rv, tv)
+
+
+                    
+                    cv2.drawFrameAxes(frame, self.camera_matrix, self.dist_coeffs, rv, tv, size)
+                    xs.append(tv[0][0])
+                    ys.append(tv[0][1])
+                    zs.append(tv[0][2])
+                    aruIds.append(id)
+
+                    # Convert rvec to rotation matrix
+                    rotation_matrix, _ = cv2.Rodrigues(np.array(rv))
+                    r =  Rotation.from_matrix(rotation_matrix)
+                    (qx, qy, qz, qw) = r.as_quat()
+                    qxs.append(qx)
+                    qys.append(qy)
+                    qzs.append(qz)
+                    qws.append(qw)
+
+                    P_tc = np.array(tv[0])
+                    P_cw = np.array(self.camera_pose_in_W)
+                    
+                    
+                    #Q_wc = np.array([qx, qy, qz, qw])
+
+                    R_wc = R_wc = self.camera_rot_in_W   #Rotation.from_quat(Q_wc)
+                    P_tw = R_wc @ P_tc + P_cw
+
+                    self.world_objects[id] = {
+                        "pos": P_tw,
+                        "size": size
+                    }
+
+                    print("P_tw :")
+                    print(P_tw)
+            #self.arucoFound = Position_aruco(x=xs, y=ys, z=zs, qx=qxs, qy=qys, qz=qzs, qw=qws, ArucoId=aruIds, cameraName=self.name)
+            #self.aruco_pub.send(self.arucoFound)
+        return frame
+    
+
     def run(self):
+        win_name = f"ArucoFinder - {self.name}"
+        cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
         while True:
             if self.src_type == Source.CAM or self.src_type == Source.VIDEO:
                 ret, frame = self.cap.read()
@@ -340,11 +586,15 @@ class ArucoFinder:
                 h, w, _ = frame.shape
                 self.getCalibration(w, h)
             
+            if self.camera_pose_in_W is None:
+                calibration_frame = self.get_camera_pose(frame)
+
             processed = self.process(frame)
             if self.display:
                 self.send_processed_frame(processed)
+
+            self.draw_world_map()
             
-            cv2.namedWindow("img", cv2.WINDOW_NORMAL)
             cv2.imshow(f"ArucoFinder - {self.name}", processed)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -373,7 +623,7 @@ if __name__ == "__main__":
     else:
         print("Please specify the source: cam, video or ecal topic.")
     
-    arucos = {20:100, 21:100, 22:100, 23:100}
+    arucos = {20:100, 21:100, 22:100, 23:100, 6:70, 47:30, 13:30, 36:30}
     known_markers = {
         20: np.array([600, 1400, 0]),   # x=600, y=1400, z=0
         21: np.array([2400, 1400, 0]),  # x=2400, y=1400, z=0
